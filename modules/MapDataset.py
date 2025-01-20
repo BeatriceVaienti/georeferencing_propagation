@@ -59,6 +59,8 @@ class MapDataset:
     image: Optional[np.ndarray] = field(default=None, init=False)
     best_matches_result: List = field(default_factory=list, init=False)
 
+    downscaling_factor: Optional[float] = field(default=None, init=False)  # To store the downscaling factor
+
     def __post_init__(self):
         """
         Post-initialization processing: load image and mask files if available.
@@ -69,14 +71,7 @@ class MapDataset:
     def _load_image(self):
         """
         Loads the main image from the file path specified in map_info.
-        If the file is a PDF, it converts the first page to an image using pdf2image.
-        
-        Tries to load the full-resolution image; if that fails due to image size limits,
-        attempts to load a reduced resolution image.
-        
-        Raises:
-            FileNotFoundError: If the file does not exist.
-            ValueError: If the image file cannot be loaded or conversion fails.
+        Tracks the downscaling factor if the image is resized.
         """
         image_path = self.map_info.image_path
 
@@ -89,11 +84,9 @@ class MapDataset:
         if ext == '.pdf':
             logger.info("Converting PDF to image: %s", image_path)
             try:
-                # Convert the first page of the PDF to an image.
-                pages = convert_from_path(image_path, dpi=200)  # dpi can be adjusted as needed
+                pages = convert_from_path(image_path, dpi=200)
                 if not pages:
                     raise ValueError(f"No pages found in PDF: {image_path}")
-                # Convert the PIL image to a NumPy array in BGR order for OpenCV.
                 pil_image = pages[0]
                 self.image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
                 logger.info("Converted PDF to image successfully.")
@@ -101,12 +94,11 @@ class MapDataset:
                 logger.error("Failed to convert PDF to image: %s", e)
                 raise ValueError(f"Failed to convert PDF to image: {image_path}") from e
         else:
-            # Supported image formats
             supported_extensions = ('.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp')
             if ext not in supported_extensions:
                 logger.error("Unsupported image file format: %s", ext)
                 raise ValueError(f"Unsupported image file format: {ext} (file: {image_path})")
-            
+
             try:
                 self.image = cv2.imread(image_path)
                 if self.image is None:
@@ -124,7 +116,7 @@ class MapDataset:
                     logger.error("OpenCV error while loading reduced resolution image: %s", e2)
                     raise ValueError(f"OpenCV error while loading image from path: {image_path}") from e2
 
-        # Check if the image is loaded and if it has too many pixels
+        # Check for downsizing due to pixel limits
         if self.image is None:
             raise ValueError(f"Failed to load image from path: {image_path}")
 
@@ -135,16 +127,17 @@ class MapDataset:
             scale_factor = (max_allowed_pixels / num_pixels) ** 0.5
             new_size = (int(self.image.shape[1] * scale_factor), int(self.image.shape[0] * scale_factor))
             self.image = cv2.resize(self.image, new_size, interpolation=cv2.INTER_AREA)
-            logger.info("Resized image to %s.", new_size)
+            self.downscaling_factor = scale_factor
+            logger.info("Resized image to %s. Downscaling factor: %.4f", new_size, scale_factor)
+        else:
+            self.downscaling_factor = 1.0
 
         logger.info("Loaded image from %s", image_path)
 
     def _load_mask(self):
         """
         Loads the mask image (in grayscale) if a mask path is provided in map_info.
-        Raises:
-            FileNotFoundError: If the mask file does not exist.
-            ValueError: If the mask file cannot be loaded.
+        Ensures that the mask matches the (potentially resized) image dimensions.
         """
         mask_path = self.map_info.mask_path
         if mask_path:
@@ -152,26 +145,51 @@ class MapDataset:
                 logger.error("Mask file not found: %s", mask_path)
                 raise FileNotFoundError(f"Mask file not found: {mask_path}")
 
-            self.mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-            if self.mask is None:
-                logger.error("Failed to load mask from path: %s", mask_path)
-                raise ValueError(f"Failed to load mask from path: {mask_path}")
+            try:
+                self.mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                if self.mask is None:
+                    raise ValueError(f"Failed to load mask from path: {mask_path}")
 
-            logger.info("Loaded mask from %s", mask_path)
+                logger.info("Loaded mask from %s", mask_path)
+
+                if hasattr(self, 'image') and self.image is not None:
+                    if self.mask.shape[:2] != self.image.shape[:2]:
+                        logger.warning(
+                            "Mask dimensions %s do not match image dimensions %s. Resizing mask.",
+                            self.mask.shape[:2], self.image.shape[:2]
+                        )
+                        self.mask = cv2.resize(self.mask, (self.image.shape[1], self.image.shape[0]),
+                                               interpolation=cv2.INTER_NEAREST)
+                        logger.info("Resized mask to match image dimensions %s.", self.image.shape[:2])
+            except cv2.error as e:
+                logger.error("OpenCV error while loading mask: %s", e)
+                raise ValueError(f"OpenCV error while loading mask from path: {mask_path}") from e
         else:
             logger.info("No mask path provided; skipping mask loading.")
 
+    def _scale_points_to_original(self, points: np.ndarray) -> np.ndarray:
+        """
+        Scales points back to the original image dimensions if the image was downsized.
+        """
+        if self.downscaling_factor and self.downscaling_factor < 1.0:
+            logger.info("Upscaling points to original dimensions using factor %.4f", 1 / self.downscaling_factor)
+            return points / self.downscaling_factor
+        return points
+
     def run_superpoint_pipeline(self):
         """
-        Runs the complete SuperPoint pipeline:
-            1. Generates a tensor from the image.
-            2. Runs SuperPoint inference.
-            3. Removes keypoints near masked-out regions.
+        Runs the complete SuperPoint pipeline, ensuring points are in the original image space.
         """
         self.generate_tensor()
         self.run_superpoint()
         self.remove_points_near_mask()
 
+        # Scale keypoints back to the original image size
+        if self.superpoint_results and self.superpoint_results.keypoints:
+            for i in range(len(self.superpoint_results.keypoints)):
+                self.superpoint_results.keypoints[i] = self._scale_points_to_original(
+                    self.superpoint_results.keypoints[i]
+                )
     def generate_tensor(self):
         """
         Generates a tensor representation from the image (and mask if provided)
