@@ -1,7 +1,6 @@
 import numpy as np
 from scipy.spatial import KDTree
 from scipy.interpolate import RBFInterpolator
-from folium import PolyLine
 from pyproj import Transformer
 from IPython.display import display
 import matplotlib.pyplot as plt
@@ -56,9 +55,6 @@ def meters_to_tensors(match_result,  base_dataset, distance_in_meters=100):
     distance_target_tensor = distance_base_tensor * scaling_factor
 
     return distance_target_tensor, distance_base_tensor
-
-
-
 
 def get_base_map(match_result, base_dataset):
     """
@@ -313,9 +309,6 @@ def calculate_rmse_with_georeferencing(
             location=[manual_coords_converted[:, 1].mean(), manual_coords_converted[:, 0].mean()],
             zoom_start=12
         )
-
-        # Plot propagated GCPs (predicted)
-
 
         # Plot manual GCPs
         for lon, lat in manual_coords_converted:

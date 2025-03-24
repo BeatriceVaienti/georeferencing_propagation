@@ -6,7 +6,7 @@
         "input_maps/target/1860_bartholomew/bartholomew_1860_mask.png"
     ],
     "anchor_image_paths": [
-        "input_maps/anchor/1860_pierotti/pierotti_1860_mask.png",
+        "input_maps/anchor/1860_pierotti/pierotti_1860.jpeg",
         "input_maps/anchor/1865_wilson/wilson_1865.jpeg",
         "input_maps/anchor/1846_vandevelde/vandevelde_1846.png"
     ],

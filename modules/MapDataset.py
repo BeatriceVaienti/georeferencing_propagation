@@ -152,55 +152,101 @@ class MapDataset:
             downscaled_path = os.path.splitext(image_path)[0] + "_downscaled.png"
             cv2.imwrite(downscaled_path, self.image)
             self.map_info.image_path = downscaled_path
-            #logger.info("Resized image saved to %s", downscaled_path)
-        #else:
-            #logger.info("Image size is within limits.")
+            logger.info("Resized image saved to %s", downscaled_path)
+        else:
+            logger.info("Image size is within limits.")
+        
+        logger.info(f"[DEBUG] For map: {self.map_info.folder}")
+
+        if self.image is not None:
+            logger.info(f"  Image shape: {self.image.shape} (dtype: {self.image.dtype})")
+        else:
+            logger.warning(f"  Image is None!")
 
     def _load_mask(self):
         """
         Loads the mask image (in grayscale) if a mask path is provided in map_info.
-        Ensures that the mask matches the image dimensions and updates the mask path if resized.
+        Ensures that the mask matches the image dimensions and logs mask statistics.
         """
         mask_path = self.map_info.mask_path
-        if mask_path:
-            if not os.path.exists(mask_path):
-                logger.error("Mask file not found: %s", mask_path)
-                raise FileNotFoundError(f"Mask file not found: {mask_path}")
+        if not mask_path:
+            logger.info("No mask path provided; skipping mask loading.")
+            return
 
-            try:
-                self.mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-                if self.mask is None:
-                    raise ValueError(f"Failed to load mask from path: {mask_path}")
+        if not os.path.exists(mask_path):
+            logger.error("Mask file not found: %s", mask_path)
+            raise FileNotFoundError(f"Mask file not found: {mask_path}")
 
-                #logger.info("Loaded mask from %s", mask_path)
+        try:
+            self.mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            if self.mask is None:
+                raise ValueError(f"Failed to load mask from path: {mask_path}")
 
-                if hasattr(self, 'image') and self.image is not None:
-                    if self.mask.shape[:2] != self.image.shape[:2]:
-                        logger.warning(
-                            "Mask dimensions %s do not match image dimensions %s. Resizing mask.",
-                            self.mask.shape[:2], self.image.shape[:2]
-                        )
-                        self.mask = cv2.resize(self.mask, (self.image.shape[1], self.image.shape[0]),
-                                               interpolation=cv2.INTER_NEAREST)
-                        downscaled_mask_path = os.path.splitext(mask_path)[0] + "_downscaled.png" 
-                        cv2.imwrite(downscaled_mask_path, self.mask)
-                        self.map_info.mask_path = downscaled_mask_path
-                        #logger.info("Resized mask saved to %s", downscaled_mask_path)
-            except cv2.error as e:
-                logger.error("OpenCV error while loading mask: %s", e)
-                raise ValueError(f"OpenCV error while loading mask from path: {mask_path}") from e
-        #else:
-            #logger.info("No mask path provided; skipping mask loading.")
+            logger.info("Loaded mask from %s with shape %s", mask_path, self.mask.shape)
+            
+            # Check if the mask has any non-zero pixels:
+            nonzero_count = np.count_nonzero(self.mask)
+            total_pixels = self.mask.size
+            zero_count = total_pixels - nonzero_count
+            
+            logger.info(
+                "Mask stats -> considered pixels: %d / %d (%.2f%%)",
+                zero_count, total_pixels, 100.0 * zero_count / total_pixels
+            )
 
+            if self.image is not None:
+                # If image is loaded, confirm shape match
+                if self.mask.shape[:2] != self.image.shape[:2]:
+                    logger.warning(
+                        "Mask dimensions %s do NOT match image dimensions %s. Resizing mask.",
+                        self.mask.shape[:2], self.image.shape[:2]
+                    )
+                    self.mask = cv2.resize(
+                        self.mask,
+                        (self.image.shape[1], self.image.shape[0]),
+                        interpolation=cv2.INTER_NEAREST
+                    )
+                    downscaled_mask_path = os.path.splitext(mask_path)[0] + "_downscaled.png"
+                    cv2.imwrite(downscaled_mask_path, self.mask)
+                    self.map_info.mask_path = downscaled_mask_path
+                    logger.info(
+                        "Resized mask saved to %s with shape %s",
+                        downscaled_mask_path, self.mask.shape
+                    )
+
+        except cv2.error as e:
+            logger.error("OpenCV error while loading mask: %s", e)
+            raise ValueError(f"OpenCV error while loading mask from path: {mask_path}") from e
+        
     def run_superpoint_pipeline(self):
         """
-        Runs the complete SuperPoint pipeline without any scaling adjustments for points.
+        Runs the complete SuperPoint pipeline and logs keypoints before/after mask removal.
         """
         self.generate_tensor()
         self.run_superpoint()
+
+        # Log how many keypoints were found by SuperPoint
+        if self.superpoint_results and self.superpoint_results.keypoints:
+            total_kp = len(self.superpoint_results.keypoints[0])
+            logger.info("Initial SuperPoint keypoints detected: %d for map: %s",
+                        total_kp, self.map_info.folder)
+        else:
+            logger.warning("No SuperPoint keypoints found for map: %s",
+                        self.map_info.folder)
+
         self.remove_points_near_mask()
 
-        #logger.info("SuperPoint pipeline completed.")
+        # After remove_points_near_mask
+        if (self.superpoint_results and 
+            self.superpoint_results.keypoints and 
+            self.superpoint_results.keypoints[0] is not None):
+            remaining_kp = len(self.superpoint_results.keypoints[0])
+            logger.info("Keypoints remaining after mask filtering: %d for map: %s",
+                        remaining_kp, self.map_info.folder)
+        else:
+            logger.warning("No keypoints remain after mask filtering for map: %s",
+                        self.map_info.folder)
+
 
     def generate_tensor(self):
         """
@@ -230,6 +276,12 @@ class MapDataset:
         # Store the results in self.superpoint_results
         self.superpoint_results = SuperPointResults(keypoints, descriptors, scores)
 
+        if self.superpoint_results and self.superpoint_results.keypoints:
+            raw_kp = len(self.superpoint_results.keypoints[0])
+            logger.info(f"  SuperPoint detected {raw_kp} keypoints before mask filtering for map: {self.map_info.folder}")
+        else:
+            logger.warning(f"  SuperPoint found NO keypoints for map: {self.map_info.folder}")
+
     def remove_points_near_mask(self, buffer: int = 20, plot: bool = False):
         """
         Removes keypoints that fall in masked-out regions using a specified buffer.
@@ -250,11 +302,13 @@ class MapDataset:
         Raises:
             ValueError: If there is a mismatch in the number of keypoints and descriptors.
         """
-        # Check the presence of mask and keypoints.
-        if (self.map_info.mask_path is None or not self.map_info.mask_path) and \
-        (self.mask is None or self.mask.size == 0) or self.superpoint_results.keypoints is None:
-            logger.warning("No mask or keypoints available for processing (Map: %s)", self.map_info.folder)
-            return        
+        if self.superpoint_results.keypoints is None:
+            logger.warning("No SuperPoint keypoints for map: %s. Skipping mask removal.", self.map_info.folder)
+            return
+
+        if self.mask is None or self.mask.size == 0:
+            logger.warning("Mask is not loaded or empty for map: %s. Skipping mask removal.", self.map_info.folder)
+            return     
 
         image = self.image
         mask = self.mask
@@ -324,7 +378,7 @@ class MapDataset:
             return
 
         # Identify keypoints falling on the masked-out regions.
-        # We assume a mask value of 0 indicates a masked-out region.
+        # We assume a mask value of 1 indicates a masked-out region.
         keypoints_on_mask = dilated_mask[transformed_y, transformed_x] == 0
         final_keep_indices = keep_indices[keypoints_on_mask]
 
@@ -787,8 +841,6 @@ def create_map_dataset(map_data: Dict[str, Any]) -> MapDataset:
         folder=folder,
         author=None,
         year=None
-        #author=None,
-        #year=year_int
     )
     
     # Create and return a MapDataset instance
