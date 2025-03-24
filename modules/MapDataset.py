@@ -1,7 +1,6 @@
 import os
 import logging
 from typing import Optional, List
-from pdf2image import convert_from_path
 import cv2
 import torch
 import numpy as np
