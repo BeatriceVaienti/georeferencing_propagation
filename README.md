@@ -32,29 +32,30 @@ It demonstrates an end-to-end pipeline that takes a set of Anchor maps (with kno
 ---
 
 ## Repository Structure
-georeferencing_propagation/ 
-├── modules/ 
-│ ├── data_preparation.py 
-│ ├── enhancement.py 
-│ ├── georeferencing_propagation.py 
-│ ├── homologous_points_detection.py 
-│ ├── MapDataset.py 
-│ ├── MatchingResult.py 
-│ ├── superpoint.py 
-│ └── visualization.py 
-├── scripts/ 
-│ └── run_pipeline.py 
-├── input/ 
-│ └── config.json # Generated pipeline configuration file 
-├── input_maps/ 
-│ ├── anchor/ 
-│ │ ├── 1846_vandevelde/  # Maps we provide with known GCPs
-│ │ └── ... 
-│ └── target/ 
-│   ├── 1860_bartholomew/  # Maps to be georeferenced, GCPs are still provided for testing
-│   └── ... 
+```
+georeferencing_propagation/
+├── modules/
+│   ├── data_preparation.py
+│   ├── enhancement.py
+│   ├── georeferencing_propagation.py
+│   ├── homologous_points_detection.py
+│   ├── MapDataset.py
+│   ├── MatchingResult.py
+│   ├── superpoint.py
+│   └── visualization.py
+├── scripts/
+│   └── run_pipeline.py
+├── input/
+│   └── config.json          # Generated pipeline configuration file
+├── input_maps/
+│   ├── anchor/
+│   │   ├── 1846_vandevelde/  # Maps we provide with known GCPs
+│   │   └── ...
+│   └── target/
+│       ├── 1860_bartholomew/  # Maps to be georeferenced, GCPs are still provided for testing
+│       └── ...
 └── map_list_preparation.ipynb
-
+```
 
 - **`modules/`**: Core functionality for data loading, feature matching, refinement, and georeferencing.
 - **`scripts/`**: Contains the main pipeline script (`run_pipeline.py`).
