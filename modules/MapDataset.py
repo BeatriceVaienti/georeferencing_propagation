@@ -11,7 +11,9 @@ import matplotlib.pyplot as plt
 from typing import Dict, Any
 from modules.data_preparation import preprocess_image
 from modules.superpoint import run_superpoint_inference
-
+import warnings
+warnings.filterwarnings("ignore", message="invalid value encountered in intersection")
+warnings.filterwarnings("ignore", message="libpng warning: iCCP: known incorrect sRGB profile")
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,6 +40,30 @@ class MapInfo:
     author: Optional[str] = None
     year: Optional[int] = None
 
+from dataclasses import dataclass, field
+from typing import Optional, List
+import os
+import cv2
+import logging
+import numpy as np
+import pandas as pd
+import torch
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class MapInfo:
+    """
+    Data structure to store metadata and file paths related to a map.
+    """
+    image_path: str
+    mask_path: Optional[str] = None
+    folder: Optional[str] = None
+    author: Optional[str] = None
+    year: Optional[int] = None
+    initial_image_path: Optional[str] = None
+    initial_mask_path: Optional[str] = None
+
 
 @dataclass
 class MapDataset:
@@ -51,27 +77,31 @@ class MapDataset:
     tensor: Optional[torch.Tensor] = None
     tensor_to_image_transform: Optional[torch.Tensor] = None
     image_to_tensor_transform: Optional[torch.Tensor] = None
-    superpoint_results: Optional[SuperPointResults] = None
+    superpoint_results: Optional[object] = None  # Replace with actual SuperPointResults type if defined
     initial_matches_stats: Optional[pd.DataFrame] = None
 
-    # Fields that are initialized during post init
-    mask: Optional[np.ndarray] = field(default=None, init=False)
-    image: Optional[np.ndarray] = field(default=None, init=False)
+    mask: Optional[np.ndarray] = None
+    image: Optional[np.ndarray] = None
     best_matches_result: List = field(default_factory=list, init=False)
-
-    downscaling_factor: Optional[float] = field(default=None, init=False)  # To store the downscaling factor
 
     def __post_init__(self):
         """
         Post-initialization processing: load image and mask files if available.
         """
-        self._load_image()
-        self._load_mask()
+        if self.image is None:
+            self._load_image()
+        #else:
+            #logger.info("Image already provided; skipping image loading.")
+
+        if self.mask is None:
+            self._load_mask()
+        #else:
+            #logger.info("Mask already provided; skipping mask loading.")
 
     def _load_image(self):
         """
         Loads the main image from the file path specified in map_info.
-        Tracks the downscaling factor if the image is resized.
+        If the image is too large, creates a downscaled copy and updates the image path.
         """
         image_path = self.map_info.image_path
 
@@ -82,14 +112,15 @@ class MapDataset:
         ext = os.path.splitext(image_path)[1].lower()
         # If the file is a PDF, convert it to an image:
         if ext == '.pdf':
-            logger.info("Converting PDF to image: %s", image_path)
+            #logger.info("Converting PDF to image: %s", image_path)
             try:
+                from pdf2image import convert_from_path
                 pages = convert_from_path(image_path, dpi=200)
                 if not pages:
                     raise ValueError(f"No pages found in PDF: {image_path}")
                 pil_image = pages[0]
                 self.image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-                logger.info("Converted PDF to image successfully.")
+                #logger.info("Converted PDF to image successfully.")
             except Exception as e:
                 logger.error("Failed to convert PDF to image: %s", e)
                 raise ValueError(f"Failed to convert PDF to image: {image_path}") from e
@@ -105,39 +136,30 @@ class MapDataset:
                     raise ValueError(f"Failed to load image from path: {image_path}")
             except cv2.error as e:
                 logger.error("OpenCV error while loading image: %s", e)
-                logger.info("Attempting to load reduced resolution image using cv2.IMREAD_REDUCED_COLOR_2.")
-                try:
-                    self.image = cv2.imread(image_path, cv2.IMREAD_REDUCED_COLOR_2)
-                    if self.image is None:
-                        raise ValueError(f"Failed to load reduced resolution image from path: {image_path}")
-                    else:
-                        logger.info("Loaded reduced resolution image from %s", image_path)
-                except cv2.error as e2:
-                    logger.error("OpenCV error while loading reduced resolution image: %s", e2)
-                    raise ValueError(f"OpenCV error while loading image from path: {image_path}") from e2
+                raise ValueError(f"OpenCV error while loading image from path: {image_path}") from e
 
         # Check for downsizing due to pixel limits
         if self.image is None:
             raise ValueError(f"Failed to load image from path: {image_path}")
 
         num_pixels = self.image.shape[0] * self.image.shape[1]
-        max_allowed_pixels = 1e8
+        max_allowed_pixels = 1e11
         if num_pixels > max_allowed_pixels:
             logger.warning("Image at %s is extremely large (%d pixels).", image_path, num_pixels)
             scale_factor = (max_allowed_pixels / num_pixels) ** 0.5
             new_size = (int(self.image.shape[1] * scale_factor), int(self.image.shape[0] * scale_factor))
             self.image = cv2.resize(self.image, new_size, interpolation=cv2.INTER_AREA)
-            self.downscaling_factor = scale_factor
-            logger.info("Resized image to %s. Downscaling factor: %.4f", new_size, scale_factor)
-        else:
-            self.downscaling_factor = 1.0
-
-        logger.info("Loaded image from %s", image_path)
+            downscaled_path = os.path.splitext(image_path)[0] + "_downscaled.png"
+            cv2.imwrite(downscaled_path, self.image)
+            self.map_info.image_path = downscaled_path
+            #logger.info("Resized image saved to %s", downscaled_path)
+        #else:
+            #logger.info("Image size is within limits.")
 
     def _load_mask(self):
         """
         Loads the mask image (in grayscale) if a mask path is provided in map_info.
-        Ensures that the mask matches the (potentially resized) image dimensions.
+        Ensures that the mask matches the image dimensions and updates the mask path if resized.
         """
         mask_path = self.map_info.mask_path
         if mask_path:
@@ -150,7 +172,7 @@ class MapDataset:
                 if self.mask is None:
                     raise ValueError(f"Failed to load mask from path: {mask_path}")
 
-                logger.info("Loaded mask from %s", mask_path)
+                #logger.info("Loaded mask from %s", mask_path)
 
                 if hasattr(self, 'image') and self.image is not None:
                     if self.mask.shape[:2] != self.image.shape[:2]:
@@ -160,116 +182,53 @@ class MapDataset:
                         )
                         self.mask = cv2.resize(self.mask, (self.image.shape[1], self.image.shape[0]),
                                                interpolation=cv2.INTER_NEAREST)
-                        logger.info("Resized mask to match image dimensions %s.", self.image.shape[:2])
+                        downscaled_mask_path = os.path.splitext(mask_path)[0] + "_downscaled.png" 
+                        cv2.imwrite(downscaled_mask_path, self.mask)
+                        self.map_info.mask_path = downscaled_mask_path
+                        #logger.info("Resized mask saved to %s", downscaled_mask_path)
             except cv2.error as e:
                 logger.error("OpenCV error while loading mask: %s", e)
                 raise ValueError(f"OpenCV error while loading mask from path: {mask_path}") from e
-        else:
-            logger.info("No mask path provided; skipping mask loading.")
-
-    def _scale_points_to_original(self, points: np.ndarray) -> np.ndarray:
-        """
-        Scales points back to the original image dimensions if the image was downsized.
-        """
-        if self.downscaling_factor and self.downscaling_factor < 1.0:
-            logger.info("Upscaling points to original dimensions using factor %.4f", 1 / self.downscaling_factor)
-            return points / self.downscaling_factor
-        return points
+        #else:
+            #logger.info("No mask path provided; skipping mask loading.")
 
     def run_superpoint_pipeline(self):
         """
-        Runs the complete SuperPoint pipeline, ensuring points are in the original image space.
+        Runs the complete SuperPoint pipeline without any scaling adjustments for points.
         """
         self.generate_tensor()
         self.run_superpoint()
         self.remove_points_near_mask()
 
-        # Scale keypoints back to the original image size
-        if self.superpoint_results and self.superpoint_results.keypoints:
-            for i in range(len(self.superpoint_results.keypoints)):
-                self.superpoint_results.keypoints[i] = self._scale_points_to_original(
-                    self.superpoint_results.keypoints[i]
-                )
+        #logger.info("SuperPoint pipeline completed.")
+
     def generate_tensor(self):
         """
-        Generates a tensor representation from the image (and mask if provided)
-        and computes the transformations between image space and tensor space.
-        
-        The image is converted to a grayscale image and normalized if needed. Then,
-        the external function `preprocess_image` is called to generate the tensor and
-        the associated transformation matrices.
-
-        Raises:
-            ValueError: If the image is not loaded or processing fails.
+        Generates a tensor from the image and mask paths and stores it in the object.
         """
-        if self.image is None:
-            raise ValueError("No image loaded in dataset.")
-
-        # Ensure the image is in uint8 format.
+            # Ensure the image is converted to uint8 if necessary
         if self.image.dtype == np.float64:
-            max_val = np.max(self.image)
-            if max_val <= 1:  # image is normalized between 0 and 1
-                self.image = (255 * np.clip(self.image, 0, 1)).astype(np.uint8)
-            else:
-                self.image = self.image.astype(np.uint8)
+            # Normalize the image if necessary, then convert to uint8
+            self.image = (255 * np.clip(self.image, 0, 1)).astype(np.uint8) if np.max(self.image) <= 1 else self.image.astype(np.uint8)
 
-        # Convert the image to grayscale.
-        try:
-            greyscale_image = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
-        except cv2.error as e:
-            logger.error("Error converting image to grayscale: %s", e)
-            raise
+        greyscale_image = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
+        self.tensor, self.image_to_tensor_transform, self.tensor_to_image_transform = preprocess_image(greyscale_image, self.mask, north_rotation_angle=self.north_rotation_angle)
 
-        # Preprocess the image and mask to generate a tensor and transformation matrices.
-        try:
-            self.tensor, self.image_to_tensor_transform, self.tensor_to_image_transform = preprocess_image(
-                greyscale_image,
-                self.mask,
-                north_rotation_angle=self.north_rotation_angle
-            )
-            logger.info("Tensor generated successfully.")
-        except Exception as e:
-            logger.error("Failed to preprocess image: %s", e)
-            raise
 
     def run_superpoint(self):
         """
-        Runs the SuperPoint inference on the generated tensor and stores the results.
-        
-        It uses an external function `run_superpoint_inference` to perform the actual inference.
-        After the inference, descriptors are reshaped from (descriptor_dim x num_keypoints)
-        to (num_keypoints x descriptor_dim) and then encapsulated in the SuperPointResults dataclass.
-        
-        Raises:
-            ValueError: If inference returns inconsistent results.
+        Uses an external function to perform SuperPoint inference.
         """
-        if self.tensor is None:
-            raise ValueError("Tensor has not been generated. Please run generate_tensor() first.")
+        # Call the external run_superpoint_inference function and get results
+        keypoints, descriptors, scores = run_superpoint_inference(self.tensor)
+        # change the shape of the descriptors tensor from descriptor_dim x num_keypoints to num_keypoints x descriptor_dim
 
-        try:
-            # External function call to get keypoints, descriptors, and scores.
-            keypoints, descriptors, scores = run_superpoint_inference(self.tensor)
-            logger.info("SuperPoint inference completed successfully.")
-        except Exception as e:
-            logger.error("SuperPoint inference failed: %s", e)
-            raise
+        descriptors = torch.stack(descriptors).squeeze(0).permute(1, 0)
 
-        # Assume descriptors is a list or tensor that needs reshaping.
-        try:
-            # If descriptors is a list of tensors, stack them first.
-            # This assumes the first dimension contains the descriptor_dim. Adjust if needed.
-            descriptors_tensor = torch.stack(descriptors).squeeze(0).permute(1, 0)
-            # Convert the result back into a list containing one tensor.
-            descriptors_processed = [descriptors_tensor]
-        except Exception as e:
-            logger.error("Error processing descriptors: %s", e)
-            raise
-
-        from dataclasses import dataclass  # Ensuring SuperPointResults is in scope
-
-        # Store the results in the corresponding dataclass structure.
-        self.superpoint_results = SuperPointResults(keypoints, descriptors_processed, scores)
-        logger.info("SuperPoint results stored successfully.")
+        # back to list
+        descriptors = [descriptors]
+        # Store the results in self.superpoint_results
+        self.superpoint_results = SuperPointResults(keypoints, descriptors, scores)
 
     def remove_points_near_mask(self, buffer: int = 20, plot: bool = False):
         """
@@ -292,9 +251,10 @@ class MapDataset:
             ValueError: If there is a mismatch in the number of keypoints and descriptors.
         """
         # Check the presence of mask and keypoints.
-        if (self.mask is None) or (self.superpoint_results is None or self.superpoint_results.keypoints is None):
+        if (self.map_info.mask_path is None or not self.map_info.mask_path) and \
+        (self.mask is None or self.mask.size == 0) or self.superpoint_results.keypoints is None:
             logger.warning("No mask or keypoints available for processing (Map: %s)", self.map_info.folder)
-            return
+            return        
 
         image = self.image
         mask = self.mask
@@ -311,7 +271,7 @@ class MapDataset:
         # Dilate the mask.
         kernel = np.ones((buffer, buffer), np.uint8)
         dilated_mask = cv2.dilate(mask, kernel, iterations=1)
-        logger.info("Mask dilated with buffer: %d", buffer)
+        #logger.info("Mask dilated with buffer: %d", buffer)
 
         # Retrieve the tensor_to_image_transform (assumed to be a 3x3 NumPy array).
         transform: np.ndarray = self.tensor_to_image_transform
@@ -377,9 +337,9 @@ class MapDataset:
             self.superpoint_results.keypoints = [filtered_keypoints]
             self.superpoint_results.descriptors = [filtered_descriptors]
             self.superpoint_results.scores = [filtered_scores]
-            logger.info("Filtered keypoints: %d remaining after mask removal.", len(final_keep_indices))
+            #logger.info("Filtered keypoints: %d remaining after mask removal.", len(final_keep_indices))
         else:
-            logger.info("No keypoints remain after filtering for map: %s", self.map_info.folder)
+            #logger.info("No keypoints remain after filtering for map: %s", self.map_info.folder)
             self.superpoint_results.keypoints = None
             self.superpoint_results.descriptors = None
             self.superpoint_results.scores = None
@@ -423,7 +383,9 @@ class MapDataset:
         - buffer: The number of pixels by which to dilate the mask to determine proximity (default is 20).
         - plot: If True, plots the dilated mask over the map image along with filtered keypoints (default is False).
         """
-        if (not self.map_info.mask_path and not self.mask) or self.superpoint_results.keypoints is None:
+        if (self.map_info.mask_path is None or not self.map_info.mask_path) and \
+        (self.mask is None or self.mask.size == 0) or \
+        self.superpoint_results.keypoints is None:
             print(f"No mask or keypoints available for map: {self.map_info.folder}")
             return
 
@@ -559,94 +521,52 @@ class MapDataset:
             plt.axis('off')
             plt.show()
 
-    def calculate_and_store_north_rotation(self):
+    def calculate_north_rotation(self):
         """
-        Calculates and stores the rotation angle to align the image north using Ground Control Points (GCPs).
+        Calculates the rotation angle to align the image north using all Ground Control Points (GCPs).
         The GCPs are used to determine the orientation of the image relative to the real-world north direction.
 
-        The rotation angle can later be used to re-orient the image before cropping or creating tensors.
-
-        This method assumes the GCPs contain:
-        - manual_coords_image: Image coordinates (sourceX, sourceY)
-        - manual_coords_world: World coordinates (mapX, mapY)
-
-        Stores the computed rotation angle (in radians) in self.north_rotation_angle calculating it from the GCPs.
+        Returns the computed rotation angle (in radians) from the GCPs.
         This method can only be used when the GCPs are available.
         """
         import numpy as np
 
+        # Check for minimum number of GCPs
         if self.gcps is None or len(self.gcps) < 2:
             print("Not enough GCPs to calculate a north rotation angle.")
-            self.north_rotation_angle = 0  # Default to 0 if no rotation can be computed
-            return
+            return 0  # Default to 0 if no rotation can be computed
 
-        # Extract image and world coordinates from GCPs
+        # Extract image and world coordinates from GCPs as numpy arrays
         manual_coords_image = self.gcps[['sourceX', 'sourceY']].to_numpy()
         manual_coords_world = self.gcps[['mapX', 'mapY']].to_numpy()
 
+        angles = []
+        n = len(self.gcps)
+        for i in range(n - 1):
+            for j in range(i + 1, n):
+                # Vector in world and image coordinates
+                vec_world = manual_coords_world[j] - manual_coords_world[i]
+                vec_image = manual_coords_image[j] - manual_coords_image[i]
 
-        # Calculate the vector representing the north direction in world coordinates
-        vec_world = manual_coords_world[1] - manual_coords_world[0]
+                # Compute angles
+                angle_world = np.arctan2(vec_world[1], vec_world[0])
+                angle_image = np.arctan2(vec_image[1], vec_image[0])
 
-        # Compute the angle of this vector relative to the positive Y-axis (i.e., north direction)
-        angle_world = np.arctan2(vec_world[1], vec_world[0])
+                angles.append(angle_image - angle_world)
 
-        # Calculate the corresponding vector in image coordinates
-        vec_image = manual_coords_image[1] - manual_coords_image[0]
+        # Return the median of all pairwise angles (could also use mean)
+        return np.median(angles)
 
-        # Compute the angle of the vector in image coordinates
-        angle_image = np.arctan2(vec_image[1], vec_image[0])
-
-        # Calculate the rotation angle needed to align the image's north with the world north
-        rotation_angle = angle_image - angle_world
-
-        # Store the rotation angle in the object
+    def calculate_and_store_north_rotation(self):
+        """
+        Calculates and then stores the north rotation angle (in radians) into self.north_rotation_angle
+        using the Ground Control Points (GCPs).
+        """
+        rotation_angle = self.calculate_north_rotation()
         self.north_rotation_angle = rotation_angle
-        #print(f"Stored north rotation angle (radians): {self.north_rotation_angle}")
-            
-    def calculate_north_rotation(self):
-        """
-        Calculates the rotation angle to align the image north using Ground Control Points (GCPs).
-        The GCPs are used to determine the orientation of the image relative to the real-world north direction.
-
-        This method assumes the GCPs contain:
-        - manual_coords_image: Image coordinates (sourceX, sourceY)
-        - manual_coords_world: World coordinates (mapX, mapY)
-
-        Stores the computed rotation angle (in radians) in self.north_rotation_angle calculating it from the GCPs.
-        This method can only be used when the GCPs are available. Since it doesn't store the results it can be useful to then evaluate the quality of the first guessed rotation.
-        """
-        import numpy as np
-
-        if self.gcps is None or len(self.gcps) < 2:
-            print("Not enough GCPs to calculate a north rotation angle.")
-            self.north_rotation_angle = 0  # Default to 0 if no rotation can be computed
-            return
-
-        # Extract image and world coordinates from GCPs
-        manual_coords_image = self.gcps[['sourceX', 'sourceY']].to_numpy()
-        manual_coords_world = self.gcps[['mapX', 'mapY']].to_numpy()
-
-
-        # Calculate the vector representing the north direction in world coordinates
-        vec_world = manual_coords_world[1] - manual_coords_world[0]
-
-        # Compute the angle of this vector relative to the positive Y-axis (i.e., north direction)
-        angle_world = np.arctan2(vec_world[1], vec_world[0])
-
-        # Calculate the corresponding vector in image coordinates
-        vec_image = manual_coords_image[1] - manual_coords_image[0]
-
-        # Compute the angle of the vector in image coordinates
-        angle_image = np.arctan2(vec_image[1], vec_image[0])
-
-        # Calculate the rotation angle needed to align the image's north with the world north
-        rotation_angle = angle_image - angle_world
-
-        # Store the rotation angle in the object
-        return rotation_angle
-        
-            
+        # Optionally print or log:
+        # print(f"Stored north rotation angle (radians): {self.north_rotation_angle}")
+              
     def extract_patch(self, x_min, y_min, x_max, y_max):
         """
         Extracts a rectangular patch from the map's tensor image based on specified coordinates.
@@ -689,6 +609,7 @@ class MapDataset:
         # Create a new MapDataset object for the patch (assuming you have a constructor for it)
         patch_map = MapDataset(
             tensor=patch_tensor,
+            
             superpoint_results=SuperPointResults(
                 keypoints=[filtered_keypoints],
                 descriptors=[filtered_descriptors],
@@ -739,6 +660,7 @@ class MapDataset:
         patch_map = MapDataset(
             map_info=self.map_info,
             image=patch_image,
+            mask = self.mask,
             superpoint_results=SuperPointResults(
                 keypoints=[filtered_keypoints],
                 descriptors=[filtered_descriptors],
@@ -842,34 +764,31 @@ def create_map_dataset(map_data: Dict[str, Any]) -> MapDataset:
     """
     # Extract folder and determine the year and author based on a naming convention.
     folder = map_data.get('folder', '')
-    year = folder.split('_')[0]
-    author = folder.split('_')[1]
+    #year = folder.split('_')[0]
+    #author = folder.split('_')[1]
     
     # Try to convert year to integer if possible, otherwise set to None.
-    try:
-        year_int = int(year)
-    except ValueError:
-        logger.warning("Year extraction failed or year is not an integer. Received: %s", year)
-        year_int = None
+    #try:
+    #    year_int = int(year)
+    #except ValueError:
+    #    logger.warning("Year extraction failed or year is not an integer. Received: %s", year)
+    #    year_int = None
 
     # Extract the image and mask paths
     image_path = map_data.get('image_path', '')
     mask_path = map_data.get('mask_path', '')
 
     # Extract GCPs (Ground Control Points), defaulting to an empty DataFrame if not provided.
-    gcps = map_data.get('points', pd.DataFrame())
-
-    # Log the extracted metadata
-    logger.info("Creating MapDataset for folder '%s' with author '%s' and year '%s'.",
-                folder, author, year_int if year_int is not None else year)
-                
+    gcps = map_data.get('points', pd.DataFrame())    
     # Construct the MapInfo object
     map_info = MapInfo(
         image_path=image_path,
         mask_path=mask_path if mask_path else None,
         folder=folder,
-        author=author,
-        year=year_int
+        author=None,
+        year=None
+        #author=None,
+        #year=year_int
     )
     
     # Create and return a MapDataset instance
@@ -877,6 +796,7 @@ def create_map_dataset(map_data: Dict[str, Any]) -> MapDataset:
         map_info=map_info,
         gcps=gcps
     )
+    #print(f"Created MapDataset for folder: {folder} with points: {len(gcps)}")
     
-    logger.info("MapDataset created successfully for folder: %s", folder)
+    
     return dataset

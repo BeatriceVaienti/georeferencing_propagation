@@ -1,0 +1,53 @@
+{
+    "title": "Jerusalem : ancient & modern.",
+    "publishers": [{
+        "wikidata_qid": "Q1938327",
+        "name": "Blackie & Son",
+        "location": {
+            "wikidata_qid": "Q4093",
+            "name": "Glasgow",
+            "new_entity": false
+        },
+        "new_entity": false
+    },
+    {
+        "wikidata_qid": "Q1938327",
+        "name": "Blackie & Son",
+        "location": {
+            "wikidata_qid": "Q23436",
+            "name": "Edinburgh",
+            "new_entity": false
+        },
+        "new_entity": false
+    },
+    {
+        "wikidata_qid": "Q1938327",
+        "name": "Blackie & Son",
+        "location": {
+            "wikidata_qid": "Q84",
+            "name": "London",
+            "new_entity": false
+        },
+        "new_entity": false
+    }],
+    "paper_extent": "28.2x21.4 cm",
+    "scale": null,
+    "is_in_nli": true,
+    "nli": {
+        "url":"https://www.nli.org.il/en/maps/NNL_ALEPH990023695970205171/NLI#$FL184621740",
+        "code": "990023695970205171"
+    },
+    "mapmakers": [{
+        "wikidata_qid": "Q6220924",
+        "name": "John Bartholomew",
+        "new_entity": false
+    }],
+    "publication_date": {
+        "wikidata_property": "P585",
+        "date": "1859-01-01T00:00:00Z"
+    },
+    "language": {
+        "wikidata_property": "P407",
+        "value": "English"
+    }
+}

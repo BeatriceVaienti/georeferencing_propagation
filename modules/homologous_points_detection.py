@@ -1,41 +1,22 @@
 from SuperGluePretrainedNetwork.models.superglue import SuperGlue
 import torch
-import numpy as np
 from typing import List
-from tqdm import tqdm
 from modules.MapDataset import MapDataset
 from modules.MatchingResult import MatchingResult
-import pandas as pd
-import matplotlib.pyplot as plt
 from scipy.spatial import Delaunay
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.strtree import STRtree
 from collections import Counter
-import copy
 import gc  # Garbage collector for memory management
 import cv2
-import matplotlib.pyplot as plt
 from skimage.measure import ransac
 from skimage.transform import AffineTransform
-from scipy.spatial import Delaunay
-from shapely.geometry import Polygon as ShapelyPolygon
-from shapely.strtree import STRtree
-from collections import Counter
 from matplotlib.patches import Polygon as MplPolygon
 import matplotlib.pyplot as plt
 import pandas as pd
-import cv2
 import numpy as np
 from tqdm import tqdm
-from shapely.geometry import Polygon as ShapelyPolygon
-from shapely.strtree import STRtree
-from collections import Counter
-
-from collections import defaultdict
-
-
-from collections import Counter
-import numpy as np
+from copy import deepcopy
 
 
 superglue_config = {
@@ -104,7 +85,6 @@ def run_superglue_matching(map1, map2, min_score=0.1):
         
     return matches, sg_data['keypoints0'], sg_data['keypoints1']
 
-
 def find_single_best_match(target_map: MapDataset, base_set: List[MapDataset], min_score=0.1):
     """
     Finds the best matching map in the base set for a single map in the target set
@@ -120,6 +100,7 @@ def find_single_best_match(target_map: MapDataset, base_set: List[MapDataset], m
     _, match_results = compute_stats_and_matches(target_map, base_set, min_score=min_score)
     best_match_result = max(match_results, key=lambda x: x['valid_matches'])
     return best_match_result
+
 
 def find_best_matches(target_set: List[MapDataset], base_set: List[MapDataset], threshold_number_matches: int = 100, number_best_results = 3, evaluation = True, min_score=0.1):
     """
@@ -196,10 +177,9 @@ def create_matching_result(target_map: MapDataset, match_data: dict) -> Matching
         superglue_matches=match_data['superglue_matches_df'],
         delaunay_filtered_matches=None,  
         enhanced_matches=None,
-        enhanced_delaunay_filtered_matches=None,
-        gcp_propagated=None
+        enhanced_delaunay_filtered_matches=None
     )
-from copy import deepcopy
+
 
 def rotate_map_dataset(map_dataset: MapDataset, num_rotations: int) -> MapDataset:
     """
@@ -230,6 +210,7 @@ def rotate_map_dataset(map_dataset: MapDataset, num_rotations: int) -> MapDatase
     rotated_map.rotated_versions = {}
     
     return rotated_map
+
 
 
 def compute_stats_and_matches(target_map: MapDataset, base_set: List[MapDataset], min_score=0.1):
@@ -339,152 +320,408 @@ def matches_to_dataframe(matches, kp1, kp2):
     return df_matches
 
 
-
-def filter_matches_with_delaunay(matches_to_filter, similarity_threshold=0.5, plot=False):
+def filter_match_with_delaunay(
+    eval_map,
+    base_dataset,
+    match_result,
+    match_to_filter_df,
+    similarity_threshold=0.3,
+    min_score_match=0.1
+):
     """
-    Filters matches based on Delaunay triangulation and similarity of triangles.
+    Iteratively remove bad matches by:
+      1) Building a Delaunay triangulation only on the first set of points (kp1_x, kp1_y).
+      2) Imposing that same connectivity on the second set (kp2_x, kp2_y).
+      3) Detecting any triangles in the second set that overlap each other.
+      4) Checking side-length similarity between the first-set triangle and the second-set
+         triangle (via filter_matches_with_delaunay).
+      5) Removing offending points, repeating until stable.
+      6) Finally calling remove_remaining_overlaps.
+
+    Parameters
+    ----------
+    eval_map : object
+        Map object for the "eval" side (unused except possibly inside remove_remaining_overlaps).
+    base_dataset : list
+        List of base map objects.
+    match_result : object
+        Contains match info, including match_result.base_folder to identify the base map.
+    match_to_filter_df : pd.DataFrame
+        Must have columns [kp1_x, kp1_y, kp2_x, kp2_y, match_score, ...].
+    similarity_threshold : float
+        Maximum allowed side-length ratio deviation. If a triangle in the second set
+        differs too much from the first set’s shape, we remove it.
+    min_score_match : float
+        Minimum match score to keep before we even begin.
+
+    Returns
+    -------
+    final_filtered_matches : pd.DataFrame
+        The matches after iterative removal of overlapping or shape-mismatch triangles,
+        plus a final pass of remove_remaining_overlaps.
+    """
+
+    # -------------------------------------------------------------------------
+    # 1) Pre-filter by match_score
+    # -------------------------------------------------------------------------
+    base_map = next(
+        (m for m in base_dataset if m.map_info.folder == match_result.base_folder),
+        None
+    )
+    matches_df = match_to_filter_df
+    if matches_df is None or matches_df.empty:
+        return matches_df
+
+    # Filter by min score
+    matches_df = matches_df[matches_df["match_score"] > min_score_match].reset_index(drop=True)
+    if len(matches_df) < 4:
+        return matches_df  # Not enough points for Delaunay
+
+    # -------------------------------------------------------------------------
+    # 2) Iterative removal loop
+    # -------------------------------------------------------------------------
+    prev_num_removed = -1
+
+    while True:
+        if len(matches_df) < 4:
+            break  # Not enough for Delaunay
+
+        # 2a) Build a Delaunay triangulation on the *first* set (eval side)
+        kp1_coords = matches_df[["kp1_x", "kp1_y"]].values
+        tri_eval = Delaunay(kp1_coords)
+        if len(tri_eval.simplices) < 1:
+            break  # No triangles formed
+
+        # 2b) Impose that connectivity on the second set (kp2_x, kp2_y),
+        #     then find all pairs of overlapping triangles among themselves.
+        kp2_coords = matches_df[["kp2_x", "kp2_y"]].values
+        polygons_second = [
+            ShapelyPolygon(kp2_coords[simplex]) for simplex in tri_eval.simplices
+        ]
+        if len(polygons_second) < 2:
+            # No chance of overlap with <2 triangles
+            break
+
+        # Build STRtree for these "imposed" polygons
+        spatial_index = STRtree(polygons_second)
+
+        # Identify which triangles in the second set overlap each other
+        overlapping_tri_indices = set()
+        for i, poly_i in enumerate(polygons_second):
+            if not poly_i.is_valid:
+                continue
+            # Query potential overlaps
+            candidates = spatial_index.query(poly_i)
+            for j in candidates:
+                if j <= i:
+                    continue
+                poly_j = polygons_second[j]
+                if poly_j.is_valid and poly_i.intersects(poly_j):
+                    if poly_i.intersection(poly_j).area > 0:
+                        overlapping_tri_indices.update([i, j])
+
+        if not overlapping_tri_indices:
+            # No overlaps among imposed triangles
+            # We still want to do a side-length shape check below,
+            # so we'll treat overlapping_tri_indices as empty but keep going.
+            pass
+
+
+        overlapping_tri_indices = sorted(list(overlapping_tri_indices))
+        if not overlapping_tri_indices:
+            # If we want to also do side-check for all triangles, we can do that.
+            # For example:
+            overlapping_tri_indices = list(range(len(tri_eval.simplices)))
+            # This means we shape-check *all* triangles each iteration.
+
+        # 2d) Gather the vertex indices from those triangles
+        overlapping_vertices = set()
+        for tri_idx in overlapping_tri_indices:
+            if tri_idx < len(tri_eval.simplices):
+                simplex = tri_eval.simplices[tri_idx]
+                overlapping_vertices.update(simplex)
+
+        # If there are no vertices to check, we are done
+        if len(overlapping_vertices) < 3:
+            break
+
+        # 2e) Build a subset DataFrame with just these overlapping vertices
+        overlapping_vertices = list(overlapping_vertices)
+        subset_df = matches_df.iloc[overlapping_vertices].copy()
+        # subset_df.index is not 0..N necessarily. Let's store the old index in a column:
+        subset_df.reset_index(drop=False, inplace=True)
+        # Now subset_df has columns ["index", "kp1_x", "kp1_y", "kp2_x", "kp2_y", ...]
+
+        # Re-map each triangle from old indices -> local subset indices
+        old_to_new = {old_i: new_i for new_i, old_i in enumerate(subset_df["index"])}
+        remapped_simplices = []
+        for tri_idx in overlapping_tri_indices:
+            if tri_idx < len(tri_eval.simplices):
+                simplex = tri_eval.simplices[tri_idx]
+                new_simplex = []
+                valid = True
+                for pt_idx in simplex:
+                    if pt_idx not in old_to_new:
+                        valid = False
+                        break
+                    new_simplex.append(old_to_new[pt_idx])
+                if valid:
+                    remapped_simplices.append(new_simplex)
+
+        # 2f) Apply the side-length similarity check
+        #     (We compare each triangle in subset_df's kp1 vs kp2).
+        filtered_subset_df = filter_matches_with_delaunay(
+            matches_to_filter=subset_df,
+            overlapping_simplices=remapped_simplices,
+            similarity_threshold=similarity_threshold
+        )
+
+        # The removed points are those that no longer appear in filtered_subset_df
+        removed_points = set(subset_df["index"]) - set(filtered_subset_df["index"])
+
+        # If nothing was removed, we are stable
+        if not removed_points:
+            break
+
+        # 2g) Drop them from matches_df
+        matches_df = matches_df.drop(labels=removed_points, axis="index", errors="ignore")
+        matches_df.reset_index(drop=True, inplace=True)
+
+        # If we removed the same number of points as last time, no more progress
+        num_removed_now = len(removed_points)
+        if num_removed_now == prev_num_removed:
+            break
+        prev_num_removed = num_removed_now
+
+    # -------------------------------------------------------------------------
+    # 3) Final pass: remove any lingering overlaps, if desired
+    # -------------------------------------------------------------------------
+    if len(matches_df) >= 4:
+        final_filtered_matches = remove_remaining_overlaps(matches_df, eval_map, base_map)
+    else:
+        final_filtered_matches = matches_df
+
+    return final_filtered_matches
+
+def filter_match_with_delaunay_old(eval_map, base_dataset, match_result, match_to_filter_df, similarity_threshold=0.3, min_score_match=0.1): # todo: if new version works, remove this one
+    """
+    Optimized version of filtering matches based on Delaunay triangulation and triangle similarity.
+    """
+    # Retrieve the base map corresponding to the match result
+    base_map = next((map_obj for map_obj in base_dataset if map_obj.map_info.folder == match_result.base_folder), None)
+    matches_df = match_to_filter_df
+
+    if matches_df is None or matches_df.empty or len(matches_df) < 4:
+        return matches_df
+
+    # Pre-filter matches based on minimum match score
+
+    matches_df = matches_df[matches_df['match_score'] > min_score_match].reset_index(drop=True)
+    if len(matches_df) < 4:
+        return matches_df
+    #print(f"Initial matches: {len(matches_df)}")
+    # Initial overlapping triangle count
+    overlapping_triangles =  find_overlapping_triangles(matches_df, eval_map, base_map)
+    num_overlapping_triangles = len(overlapping_triangles)
+    if num_overlapping_triangles == 0:
+        return matches_df
+    #print(f"Initial overlapping triangles: {num_overlapping_triangles}")
+
+    # Iterative filtering to reduce overlaps
+    prev_num_overlapping_triangles = num_overlapping_triangles
+    while True:
+        # Apply Delaunay filtering
+        filtered_matches =  filter_matches_with_delaunay(matches_df, similarity_threshold=similarity_threshold)
+
+        # Count overlapping triangles after filtering
+        if len(filtered_matches) < 4:
+            return filtered_matches
+        overlapping_triangles = find_overlapping_triangles(filtered_matches, eval_map, base_map)
+        num_overlapping_triangles = len(overlapping_triangles)
+
+        # Check for convergence
+        if num_overlapping_triangles < prev_num_overlapping_triangles:
+            matches_df = filtered_matches
+            prev_num_overlapping_triangles = num_overlapping_triangles
+        else:
+            break
+
+    # Final cleanup to remove remaining overlaps
+    if len(matches_df) > 3:
+        final_filtered_matches =  remove_remaining_overlaps(matches_df, eval_map, base_map)
+    else:
+        final_filtered_matches = matches_df
+
+    return final_filtered_matches
+
+
+
+def filter_matches_with_delaunay(matches_to_filter, overlapping_simplices, similarity_threshold=0.5, plot=False):
+    """
+    Given a subset of matches (matches_to_filter) and a list of overlapping triangles
+    (overlapping_simplices), check if they pass the side-length similarity threshold.
+    Triangles that fail are marked for removal.
 
     Parameters:
-    - matches_to_filter: DataFrame containing the match coordinates 'kp1_x', 'kp1_y', 'kp2_x', 'kp2_y'.
-    - similarity_threshold: Threshold for deviation from similarity (default 0.2).
-    - plot: If True, plots up to the first three triangles flagged for removal.
+    - matches_to_filter: DataFrame with columns kp1_x, kp1_y, kp2_x, kp2_y, and an Index 0..N
+    - overlapping_simplices: list of length-K, each is [i0, i1, i2] with i0,i1,i2 in [0..len(matches_to_filter)-1]
+    - similarity_threshold: e.g. 0.5 or 1. The maximum allowed (max_ratio - min_ratio).
+    - plot: if True, you could visualize outliers for debugging
 
     Returns:
-    - filtered_matches: DataFrame with filtered matches after removing outliers.
+    - filtered_matches: DataFrame after removing points that appear in "bad" triangles.
     """
-    kp1_coords = matches_to_filter[['kp1_x', 'kp1_y']].values
-    kp2_coords = matches_to_filter[['kp2_x', 'kp2_y']].values
 
-    
-    if len(kp1_coords) < 3:
-        #print("Not enough points for Delaunay triangulation.")
+    kp1_coords = matches_to_filter[["kp1_x", "kp1_y"]].values
+    kp2_coords = matches_to_filter[["kp2_x", "kp2_y"]].values
+
+    if len(matches_to_filter) < 4 or len(overlapping_simplices) == 0:
+        # Nothing to filter
         return matches_to_filter
 
-    # Initial Delaunay triangulation on kp1
-    initial_tri_kp1 = Delaunay(kp1_coords)
+    # --- Compute side-lengths in the subset of triangles ---
+    # For each simplex [a,b,c] in overlapping_simplices, we measure the sides
+    # in the first image (kp1_coords) and the second (kp2_coords).
+    #
+    # Each triangle has 3 edges, so we measure 3 side lengths. We'll get shape Nx3.
+    try:
+        kp1_sides = np.array([
+            [
+                np.linalg.norm(kp1_coords[simplex[i]] - kp1_coords[simplex[j]])
+                for i in range(3)
+                for j in range(i+1, 3)
+            ]
+            for simplex in overlapping_simplices
+        ])
+        kp2_sides = np.array([
+            [
+                np.linalg.norm(kp2_coords[simplex[i]] - kp2_coords[simplex[j]])
+                for i in range(3)
+                for j in range(i+1, 3)
+            ]
+            for simplex in overlapping_simplices
+        ])
+    except IndexError:
+        # Means one of the simplex indices was out-of-range.
+        # Usually you avoid this by re-mapping in the caller function.
+        return matches_to_filter
 
+    # --- Normalize side lengths to compare shape similarity ---
+    kp1_mean = kp1_sides.mean(axis=1, keepdims=True)
+    kp2_mean = kp2_sides.mean(axis=1, keepdims=True)
+
+    # Avoid division by zero for degenerate triangles
+    kp1_sides_norm = np.divide(kp1_sides, kp1_mean, out=np.zeros_like(kp1_sides), where=(kp1_mean!=0))
+    kp2_sides_norm = np.divide(kp2_sides, kp2_mean, out=np.zeros_like(kp2_sides), where=(kp2_mean!=0))
+
+    # Ratio of side lengths
+    side_ratios = np.divide(kp2_sides_norm, kp1_sides_norm, out=np.ones_like(kp2_sides_norm), where=(kp1_sides_norm!=0))
+
+    max_ratios = side_ratios.max(axis=1)
+    min_ratios = side_ratios.min(axis=1)
+    similarity_deviation = max_ratios - min_ratios
+
+    # Identify triangles that fail the similarity threshold
+    bad_tri_indices = np.where(similarity_deviation > similarity_threshold)[0]
+    if len(bad_tri_indices) == 0:
+        # All good => no removal
+        return matches_to_filter
+
+    # Collect all the points in "bad" triangles
+    bad_triangles = [overlapping_simplices[i] for i in bad_tri_indices]
     points_to_remove = set()
-    triangles_plotted = 0  # Counter to limit the number of triangles plotted
+    for tri in bad_triangles:
+        points_to_remove.update(tri)
 
-    for simplex in initial_tri_kp1.simplices:
-
-        # Calculate side lengths for kp1 and kp2 triangles
-        sides_kp1 = [np.linalg.norm(kp1_coords[simplex[i]] - kp1_coords[simplex[j]]) for i in range(3) for j in range(i + 1, 3)]
-        sides_kp2 = [np.linalg.norm(kp2_coords[simplex[i]] - kp2_coords[simplex[j]]) for i in range(3) for j in range(i + 1, 3)]
-
-        normalized_sides_kp1 = [s / np.mean(sides_kp1) for s in sides_kp1]
-        normalized_sides_kp2 = [s / np.mean(sides_kp2) for s in sides_kp2]
-
-        # Calculate the ratio for each corresponding side
-        side_ratios = [s2 / s1 if s1 > 0 else 0 for s1, s2 in zip(normalized_sides_kp1, normalized_sides_kp2)]
-        
-        # Calculate d = max(ratios) - min(ratios)
-        similarity_deviation = max(side_ratios) - min(side_ratios)
-        
-        # If deviation from similarity exceeds the threshold, mark the triangle as problematic
-        if similarity_deviation > similarity_threshold:
-            max_ratio_index = np.argmax(side_ratios)
-            min_ratio_index = np.argmin(side_ratios)
-
-            # Determine the vertex between the max and min ratio sides
-            if (max_ratio_index, min_ratio_index) in [(0, 1), (1, 0)]:
-                problematic_point = simplex[1]
-            elif (max_ratio_index, min_ratio_index) in [(1, 2), (2, 1)]:
-                problematic_point = simplex[2]
-            else:  # (0, 2) or (2, 0)
-                problematic_point = simplex[0]
-
-            points_to_remove.add(problematic_point)
-
-            # Plot up to the first three triangles flagged for removal
-            if plot and triangles_plotted < 3:
-                fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-
-                # Labels for vertices
-                labels = ['A', 'B', 'C']
-                
-                # Triangle from the initial triangulation on kp1
-                triangle_kp1 = kp1_coords[simplex]
-                axes[0].plot(triangle_kp1[:, 0], triangle_kp1[:, 1], 'o-', color='blue', label="Triangle Vertices (kp1)")
-                axes[0].set_title("Triangle in Target Image (kp1)")
-                
-                # Annotate vertices with labels A, B, C
-                for i, (x, y) in enumerate(triangle_kp1):
-                    axes[0].text(x, y, labels[i], fontsize=12, ha='right', color='blue')
-                
-                # Annotate each side with its ratio and highlight max/min sides
-                for i, side_ratio in enumerate(side_ratios):
-                    pt1, pt2 = triangle_kp1[i], triangle_kp1[(i + 1) % 3]
-                    mid_x, mid_y = (pt1[0] + pt2[0]) / 2, (pt1[1] + pt2[1]) / 2
-                    color = 'red' if i == max_ratio_index or i == min_ratio_index else 'black'
-                    axes[0].plot([pt1[0], pt2[0]], [pt1[1], pt2[1]], color=color, linestyle='--' if color == 'red' else '-', linewidth=1)
-                    axes[0].text(mid_x, mid_y, f'{side_ratio:.2f}', color='red' if color == 'red' else 'black', fontsize=10, ha='center')
-
-                # Mark the problematic point in kp1
-                outlier_kp1 = triangle_kp1[simplex.tolist().index(problematic_point)]
-                axes[0].plot(outlier_kp1[0], outlier_kp1[1], 'ro', label="Problematic Point")
-                axes[0].legend()
-
-                # Triangle from the corresponding points in kp2
-                triangle_kp2 = kp2_coords[simplex]
-                axes[1].plot(triangle_kp2[:, 0], triangle_kp2[:, 1], 'o-', color='green', label="Triangle Vertices (kp2)")
-                axes[1].set_title("Corresponding Triangle in Base Image (kp2)")
-
-                # Annotate vertices with labels A, B, C
-                for i, (x, y) in enumerate(triangle_kp2):
-                    axes[1].text(x, y, labels[i], fontsize=12, ha='right', color='green')
-
-                # Annotate each side with its ratio and highlight max/min sides
-                for i, side_ratio in enumerate(side_ratios):
-                    pt1, pt2 = triangle_kp2[i], triangle_kp2[(i + 1) % 3]
-                    mid_x, mid_y = (pt1[0] + pt2[0]) / 2, (pt1[1] + pt2[1]) / 2
-                    color = 'red' if i == max_ratio_index or i == min_ratio_index else 'black'
-                    axes[1].plot([pt1[0], pt2[0]], [pt1[1], pt2[1]], color=color, linestyle='--' if color == 'red' else '-', linewidth=1)
-                    axes[1].text(mid_x, mid_y, f'{side_ratio:.2f}', color='red' if color == 'red' else 'black', fontsize=10, ha='center')
-
-                plt.show()
-
-                triangles_plotted += 1  # Increment the plot counter
-
-    # Filter out the matches involving problematic points
-    filtered_matches = matches_to_filter.drop(list(points_to_remove), errors="ignore").reset_index(drop=True)
+    # Filter them out
+    keep_mask = ~matches_to_filter.index.isin(points_to_remove)
+    filtered_matches = matches_to_filter[keep_mask].reset_index(drop=True)
 
     return filtered_matches
-
-
-
-def find_overlapping_triangles(match_result_2, target_map, base_map):
+def plot_triangle(kp1_coords, kp2_coords, simplex, similarity_deviation):
     """
-    finds the overlapping triangles in a match
-
+    Helper function to plot a problematic triangle.
     """
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    labels = ['A', 'B', 'C']
 
-    # Extract keypoint coordinates (already in tensor space)
-    kp1_coords = match_result_2[['kp1_x', 'kp1_y']].values.astype(np.float32)
-    kp2_coords = match_result_2[['kp2_x', 'kp2_y']].values.astype(np.float32)
-    transformation_matrix_target = target_map.tensor_to_image_transform[:2, :]
-    transformation_matrix_base = base_map.tensor_to_image_transform[:2, :]
-    kp1_coords = cv2.transform(kp1_coords.reshape(-1, 1, 2), transformation_matrix_target).reshape(-1, 2)
-    kp2_coords = cv2.transform(kp2_coords.reshape(-1, 1, 2), transformation_matrix_base).reshape(-1, 2)
+    # Plot triangle in kp1
+    triangle_kp1 = kp1_coords[simplex]
+    axes[0].plot(triangle_kp1[:, 0], triangle_kp1[:, 1], 'o-', color='blue')
+    axes[0].set_title(f"Triangle in kp1 (Deviation: {similarity_deviation:.2f})")
+    for i, (x, y) in enumerate(triangle_kp1):
+        axes[0].text(x, y, labels[i], fontsize=12, ha='right', color='blue')
 
-    tri_all = Delaunay(kp1_coords)
-    # Apply same triangulation structure
-    overlapping_triangles = []
-    polygons = []
-    for simplex in tri_all.simplices:
-        triangle_points = kp2_coords[simplex]
-        polygon = ShapelyPolygon(triangle_points)
-        polygons.append(polygon)
+    # Plot triangle in kp2
+    triangle_kp2 = kp2_coords[simplex]
+    axes[1].plot(triangle_kp2[:, 0], triangle_kp2[:, 1], 'o-', color='green')
+    axes[1].set_title("Corresponding Triangle in kp2")
+    for i, (x, y) in enumerate(triangle_kp2):
+        axes[1].text(x, y, labels[i], fontsize=12, ha='right', color='green')
 
-    # Identify overlapping triangles
-    for i in range(len(polygons)):
-        for j in range(i + 1, len(polygons)):
-            if polygons[i].intersects(polygons[j]):
-                intersection_area = polygons[i].intersection(polygons[j]).area
-                if intersection_area > 0:
-                    overlapping_triangles.extend([i, j])
-    overlapping_triangles = list(set(overlapping_triangles))
-    return overlapping_triangles
+    plt.show()
+
+
+def find_overlapping_triangles(matches_df):
+    """
+    Perform a Delaunay triangulation on the first set of points (kp1_x, kp1_y),
+    then impose that same connectivity on the second set (kp2_x, kp2_y).
+    Detect any triangles in the second set that overlap each other.
+
+    Returns a list of indices (triangle IDs) that are involved in overlap.
+    """
+    kp1 = matches_df[["kp1_x","kp1_y"]].values
+    kp2 = matches_df[["kp2_x","kp2_y"]].values
+
+    if len(kp1) < 4:
+        # Not enough for a Delaunay
+        return []
+
+    # 1) Delaunay on the first set
+    tri = Delaunay(kp1)  
+    # tri.simplices is shape (N, 3) => each row = [i0, i1, i2]
+
+    if len(tri.simplices) < 1:
+        return []
+
+    # 2) Build polygons in the second set using the same connectivity
+    polygons_imposed = [
+        ShapelyPolygon(kp2[simplex]) for simplex in tri.simplices
+    ]
+
+    if len(polygons_imposed) < 2:
+        # You can't overlap with fewer than 2 triangles
+        return []
+
+    # 3) Put these polygons in an STRtree to find overlapping pairs efficiently
+    spatial_index = STRtree(polygons_imposed)
+
+    # 4) Check each polygon for overlap with the others
+    overlapping_indices = set()
+
+    for i, poly_i in enumerate(polygons_imposed):
+        if not poly_i.is_valid:
+            continue
+        # Query the tree: returns indices of polygons that might overlap
+        candidate_indices = spatial_index.query(poly_i)
+
+        for j in candidate_indices:
+            if j <= i:
+                continue  # Avoid double-counting or comparing the same poly
+
+            poly_j = polygons_imposed[j]
+            if not poly_j.is_valid:
+                continue
+
+            # Check actual intersection area
+            if poly_i.intersects(poly_j):
+                if poly_i.intersection(poly_j).area > 0:
+                    # Mark them
+                    overlapping_indices.add(i)
+                    overlapping_indices.add(j)
+
+    # Return the triangle IDs from tri.simplices that overlap
+    return list(overlapping_indices)
 
 def find_overlapping_triangles_numpy(kp1_coords_transformed, kp2_coords_transformed, overlap_threshold=0.1):
     """
@@ -651,188 +888,172 @@ def filter_eval_map_with_delaunay(eval_map, base_dataset, matches_to_filter = 'd
 
     return eval_map
 
-
-def filter_match_with_delaunay(eval_map, base_dataset, match_result, match_to_filter_df , similarity_threshold = 0.3, min_score_match = 0.1):
+def estimate_north_rotation(map_obj, best_match, min_match_score=0.4, plot_transformation=False):
     """
-    Filters matches based on Delaunay triangulation and similarity of triangles.
-    we can choose to filter the matches from the initial matches, the ransac filtered matches, the enhanced matches or the enhanced ransac filtered matches.
-    matches_to_filter can be 'superglue_matches', 'ransac_filtered_matches', 'enhanced_matches' or 'enhanced_ransac_filtered_matches'
+    Estimates the north rotation of the target map by leveraging the best matched anchor map.
+    The estimated rotation accounts for:
+    - The relative transformation estimated via RANSAC.
+    - The absolute north orientation of the best match (anchor map).
+    - The macro rotation that was previously applied to the target map.
+
+    Parameters:
+        - map_obj: The target map object.
+        - best_match: The best match dictionary containing the anchor map and matches.
+        - min_match_score: Minimum match score threshold for filtering.
+        - plot_transformation: Whether to visualize the transformation.
+
+    Returns:
+        - derived_north_rotation: The estimated absolute north rotation of the target map.
     """
     
-    base_map = next((map_obj for map_obj in base_dataset if map_obj.map_info.folder == match_result.base_folder), None)
-    matches_df = match_to_filter_df
-
-    if matches_df is None or matches_df.empty or len(matches_df) < 4:
-        return matches_df
-
-    number_of_overlapping_triangles = len(find_overlapping_triangles(matches_df, eval_map, base_map))
-    if number_of_overlapping_triangles == 0:
-        return matches_df
-
-        
-    scores = matches_df['match_score'].values
-    # Filter out matches with scores below the threshold
-    valid_matches = scores > min_score_match
-    matches_df = matches_df[valid_matches].reset_index(drop=True)
-    
-    # Initialize variables to track overlap reduction
-    prev_number_of_overlapping_triangles = float('inf')
-    decreasing = True
-    iteration = 0
-        
-    while decreasing:
-        # Filter matches using the Delaunay filtering function
-        filtered_matches = filter_matches_with_delaunay(matches_df, similarity_threshold = similarity_threshold)
-        
-        # Count the number of overlapping triangles after filtering
-        if len(filtered_matches) < 4:
-            return filtered_matches
-
-        new_number_of_overlapping_triangles = len(find_overlapping_triangles(filtered_matches, eval_map, base_map))
-
-
-        # Check if the number of overlapping triangles has diminished
-        if new_number_of_overlapping_triangles < prev_number_of_overlapping_triangles:
-            # Update matches_df and prev_number_of_overlapping_triangles for next iteration
-            matches_df = filtered_matches
-            prev_number_of_overlapping_triangles = new_number_of_overlapping_triangles
-            iteration += 1
-        else:
-            # If the number stops diminishing, end the loop
-            decreasing = False
-    
-    # only do this if theres more than 3 points
-    if len(matches_df) > 3:
-        number_of_overlapping_triangles = len(find_overlapping_triangles(matches_df, eval_map, base_map))
-        final_filtered_matches = remove_remaining_overlaps(matches_df, eval_map, base_map)
-    else:
-        final_filtered_matches = matches_df
-
-    return final_filtered_matches
-
-
-def estimate_north_rotation(map_obj, best_match, min_match_score = 0.4, plot_transformation = False):
     best_map = best_match["base_map"]
-
-    # Step 4: Ensure Both Maps Have SuperPoint Results
+    
     if best_map.superpoint_results.keypoints is None or best_map.superpoint_results.descriptors is None:
         print(f"Best match {best_map.map_info.folder} does not have keypoints or descriptors.")
-    # Step 6: Access Precomputed Matches from superglue_matches_df
+        return 0.0
+
     matches_df = best_match.get('superglue_matches_df', None)
     if matches_df is None or matches_df.empty:
         print(f"No matches found in superglue_matches_df for {best_map.map_info.folder}.")
-        derived_north_rotation = 0.0  # Assign a default value or handle accordingly
+        return 0.0  # Default if no valid matches
+
+    # Filter matches based on score
+    filtered_matches_df = matches_df[matches_df['match_score'] >= min_match_score]
+    if len(filtered_matches_df) < 4:
+        print(f"Not enough high-confidence matches between {map_obj.map_info.folder} and {best_map.map_info.folder}.")
+        return 0.0  # Default if not enough points
+    # Extract matched keypoints from the *tensor* space
+    src_pts_tensor = filtered_matches_df[['kp1_x', 'kp1_y']].values  # Keypoints from target map (tensor space)
+    dst_pts_tensor = filtered_matches_df[['kp2_x', 'kp2_y']].values  # Keypoints from anchor map (tensor space)
+
+    # Convert them to homogeneous coords for matrix multiplication
+    src_pts_h = np.column_stack([src_pts_tensor, np.ones(len(src_pts_tensor))])
+    dst_pts_h = np.column_stack([dst_pts_tensor, np.ones(len(dst_pts_tensor))])
+
+    # Invert to original image space
+    src_pts_orig = []
+    dst_pts_orig = []
+
+    for i in range(len(src_pts_h)):
+        # Target map
+        src_pt_img = map_obj.tensor_to_image_transform @ src_pts_h[i]
+        src_pt_img /= src_pt_img[2]
+        src_pts_orig.append(src_pt_img[:2])
+
+        # Anchor map
+        dst_pt_img = best_map.tensor_to_image_transform @ dst_pts_h[i]
+        dst_pt_img /= dst_pt_img[2]
+        dst_pts_orig.append(dst_pt_img[:2])
+
+    src_pts_orig = np.array(src_pts_orig)
+    dst_pts_orig = np.array(dst_pts_orig)
+
+    # Now run RANSAC on these "original space" points
+    try:
+        model_robust, inliers = ransac(
+            (src_pts_orig, dst_pts_orig),
+            AffineTransform,
+            min_samples=3,
+            residual_threshold=5,
+            max_trials=1000
+        )
+    except ValueError as e:
+        print(f"RANSAC failed to find a valid affine transform: {e}")
+        return 0.0
+
+    if model_robust is not None:
+        # Extract the relative rotation component from the affine transformation
+        theta_rad = -np.arctan2(model_robust.params[1, 0], model_robust.params[0, 0])
+
+        # Consider the absolute north rotation of the anchor map
+        best_map_rotation = best_map.north_rotation_angle if best_map.north_rotation_angle is not None else 0.0
+
+        # Consider the macro rotation already applied to the target map
+        previous_target_rotation = map_obj.north_rotation_angle if map_obj.north_rotation_angle is not None else 0.0
+
+        # Compute the final absolute north rotation of the target map
+        derived_north_rotation =  (best_map_rotation or 0.0)-(theta_rad or 0.0) #+ (previous_target_rotation or 0.0)
+        if derived_north_rotation is None:
+            print(f"Warning: derived_north_rotation is None for {map_obj.folder}. Defaulting to 0.0.")
+            derived_north_rotation = 0.0
+
     else:
-        # Optional: Filter Matches Based on Match Score Threshold
-        score_threshold = min_match_score  # Adjust based on your requirements
-        filtered_matches_df = matches_df[matches_df['match_score'] >= score_threshold]
-        num_matches = len(filtered_matches_df)
-        #print(f"Number of matches after filtering: {num_matches}")
+        print(f"Transformation matrix could not be estimated between {map_obj.folder} and {best_map.map_info.folder}.")
+        return 0.0
+
+    # Assign the computed rotation to the target map
+    map_obj.north_rotation_angle = derived_north_rotation
+
+    # Optional: Visualization of rotation
+    if plot_transformation:
+        # Convert to degrees (ensure correct sign)
+        theta_deg = np.degrees(derived_north_rotation)
         
-        if num_matches < 4:
-            print(f"Not enough high-confidence matches between {map_obj.map_info.folder} and {best_map.map_info.folder}.")
-            derived_north_rotation = 0.0  # Assign a default value or handle accordingly
-        else:
-            # Step 7: Extract Matched Keypoints
-            src_pts = filtered_matches_df[['kp1_x', 'kp1_y']].values
-            dst_pts = filtered_matches_df[['kp2_x', 'kp2_y']].values
-            
-            try:
-                model_robust, inliers = ransac(
-                    (src_pts, dst_pts),
-                    AffineTransform,
-                    min_samples=3,
-                    residual_threshold=5,
-                    max_trials=1000
-                )
-            except ValueError as e:
-                print(f"RANSAC failed to find a valid affine transform: {e}")
-                model_robust = None
+        print(f"In degrees, Macro rotation: {np.degrees(previous_target_rotation)}, "
+            f"Best map rotation: {np.degrees(best_map.north_rotation_angle)}, STORED target ROTATION: {np.degrees(map_obj.north_rotation_angle)} "
+            f"Relative rotation: {np.degrees(theta_rad)}, Total rotation: {np.degrees(derived_north_rotation)}")
 
-            if model_robust is not None:
-                # Step 9: Extract Rotation Angle from Affine Matrix
-                # Access the transformation matrix via 'params' attribute
-                theta_rad = np.arctan2(model_robust.params[1, 0], model_robust.params[0, 0])
-                if map_obj.north_rotation_angle is not None:
-                    derived_north_rotation = theta_rad + map_obj.north_rotation_angle
-                else:
-                    derived_north_rotation = theta_rad
-                #print(f"Derived North Rotation (radians): {derived_north_rotation}")
-            else:
-                # Handle the Case Where Transformation Couldn't Be Estimated
-                print(f"Transformation matrix could not be estimated between {map_obj.map_info.folder} and {best_map.map_info.folder}.")
-                derived_north_rotation = 0.0  # Assign a default value
+        image_height, image_width = map_obj.image.shape[:2]
+        image_center = (image_width / 2, image_height / 2)
 
-        map_obj.north_rotation_angle = derived_north_rotation
+        # Apply rotation to the target map
+        rotation_matrix = cv2.getRotationMatrix2D(image_center, -theta_deg, 1.0)  # Negative for correct OpenCV convention
+        warped_image = cv2.warpAffine(map_obj.image, rotation_matrix, (image_width, image_height))
 
-        if plot_transformation and model_robust is not None:
-            # Step 1: Convert Rotation Angle from Radians to Degrees
-            theta_deg = -np.degrees(derived_north_rotation)
-            print(theta_deg)
-            # Step 2: Get Image Dimensions
-            image_height, image_width = map_obj.image.shape[:2]
-            image_center = (image_width / 2, image_height / 2)
+        # Function to plot an arrow for north direction
+        def plot_north_arrow(ax, center, rotation, length_factor=0.5, color="red"):
+            """
+            Plots an arrow indicating north direction.
 
-            # Step 3: Compute the Rotation Matrix
-            rotation_matrix = cv2.getRotationMatrix2D(image_center, theta_deg, 1.0)  # Scale=1.0 for rigid rotation
+            Parameters:
+                - ax: Matplotlib axis to plot on.
+                - center: (x, y) coordinates for arrow origin.
+                - rotation: Angle in radians.
+                - length_factor: Scale factor for arrow length.
+                - color: Arrow color.
+            """
+            x, y = center
+            length = max(image_width, image_height) * length_factor  # Scale arrow size relative to image
+            dx = length * np.sin(-rotation)  # Negative to align with image coordinates
+            dy = -length * np.cos(-rotation)  
 
-            # Step 4: Calculate the sine and cosine of rotation angle
-            #correct to account for possible negative values? like 260 degrees is problematic
-            abs_cos = abs(rotation_matrix[0, 0])
-            abs_sin = abs(rotation_matrix[0, 1])
+            ax.arrow(x, y, dx, dy, head_width=length * 0.05, head_length=length * 0.1,
+                    fc=color, ec=color, linewidth=3)
+            ax.text(x + dx * 1.2, y + dy * 1.2, "N", fontsize=14, color=color, weight='bold')
 
-            # Step 5: Compute the new bounding dimensions of the image
-            new_width = int(image_height * abs_sin + image_width * abs_cos)
-            new_height = int(image_height * abs_cos + image_width * abs_sin)
+        # Plot results
+        fig, axes = plt.subplots(1, 3, figsize=(20, 10))
 
-            # Step 6: Adjust the rotation matrix to account for translation
-            rotation_matrix[0, 2] += new_width / 2 - image_center[0]
-            rotation_matrix[1, 2] += new_height / 2 - image_center[1]
+        # Original target map
+        axes[0].imshow(map_obj.image, cmap='gray')
+        axes[0].set_title(f"{map_obj.folder} - Original")
+        axes[0].axis('off')
+        #plot_north_arrow(axes[0], image_center, derived_north_rotation, length_factor=0.3, color="blue")  # Initial north
 
-            # Step 7: Perform the rotation
-            warped_image = cv2.warpAffine(map_obj.image, rotation_matrix, (new_width, new_height))
+        # Rotated target map
+        axes[1].imshow(warped_image, cmap='gray')
+        axes[1].set_title(f"{map_obj.folder} - Rotated to Align with North")
+        axes[1].axis('off')
+        plot_north_arrow(axes[1], image_center, 0.0, length_factor=0.3, color="red")  # Should be aligned north
 
-            # Step 8: Convert images from BGR to RGB for plotting
-            if warped_image.ndim == 3:
-                warped_image_rgb = cv2.cvtColor(warped_image, cv2.COLOR_BGR2RGB)
-            else:
-                warped_image_rgb = warped_image.copy()
+        # Anchor map
+        #tensor image 
+        tensor = best_map.tensor
+        # get image from tensor considering that the shape is 1,1,480,640
+        image_tensor = tensor.squeeze().detach().cpu().numpy()
 
-            if map_obj.image.ndim == 3:
-                original_image_rgb = cv2.cvtColor(map_obj.image, cv2.COLOR_BGR2RGB)
-            else:
-                original_image_rgb = map_obj.image.copy()
+        axes[2].imshow(image_tensor, cmap='gray')
+        axes[2].set_title(f"{best_map.map_info.folder} - Reference Anchor Map")
+        axes[2].axis('off')
+        plt.show()
+    
+    return derived_north_rotation
 
-            if best_map.image.ndim == 3:
-                best_map_image_rgb = cv2.cvtColor(best_map.image, cv2.COLOR_BGR2RGB)
-            else:
-                best_map_image_rgb = best_map.image.copy()
-
-            # Step 9: Plot Original, Warped, and Best Match Images Side by Side
-            plt.figure(figsize=(20, 10))
-
-            plt.subplot(1, 3, 1)
-            plt.imshow(original_image_rgb)
-            plt.title(f"{map_obj.map_info.folder} - Original")
-            plt.axis('off')
-
-            plt.subplot(1, 3, 2)
-            plt.imshow(warped_image_rgb)
-            plt.title(f"{map_obj.map_info.folder} - Rigidly Rotated to {best_map.map_info.folder}")
-            plt.axis('off')
-
-            plt.subplot(1, 3, 3)
-            plt.imshow(best_map_image_rgb)
-            plt.title(f"{best_map.map_info.folder} - Reference")
-            plt.axis('off')
-
-            plt.show()
-
-        return derived_north_rotation
     
 
+
 def find_north_from_best_match(target_map, base_dataset, min_match_score, plot=False):
-    #check that we are adding the north rotation to the initial one todo
+    
     rotation_angles = [np.pi / 2, np.pi, 3 * np.pi / 2]
     target_map.run_superpoint_pipeline()
     if plot:
@@ -870,6 +1091,7 @@ def find_north_from_best_match(target_map, base_dataset, min_match_score, plot=F
 
 
 
+
 def remove_outliers_ransac(matches_df, ransac_threshold=0.1, ransac_max_trials=1000):
     """
     Removes outliers using RANSAC on the match coordinates.
@@ -884,12 +1106,93 @@ def remove_outliers_ransac(matches_df, ransac_threshold=0.1, ransac_max_trials=1
     """
     
     # Extract keypoint coordinates
+    if matches_df is None:
+        #print("No matches to filter.")
+        return None
+    
     kp1_coords = matches_df[['kp1_x', 'kp1_y']].values
     kp2_coords = matches_df[['kp2_x', 'kp2_y']].values
-
+    
+    if kp1_coords.shape[0] < 3 or kp2_coords.shape[0] < 3 or len(matches_df) < 3:
+        #print("Not enough points for RANSAC.")
+        return None
+    
     # Perform RANSAC to remove outliers
     model, inliers = ransac((kp1_coords, kp2_coords), AffineTransform, min_samples=3, residual_threshold=ransac_threshold, max_trials=ransac_max_trials)
 
     # Filter matches based on inlier indices
     filtered_matches_df = matches_df.iloc[inliers].reset_index(drop=True)
     return filtered_matches_df
+
+
+def process_target_map_with_rotation(map_obj, base_dataset, min_match_score=0.3, match_threshold=100, plot_transformation=False):
+    """
+    Processes a single target map object, running SuperPoint and handling rotations
+    to improve matches and estimate the north rotation angle.
+
+    Parameters:
+    - map_obj: The target map object to process.
+    - base_dataset: The dataset of base maps to match against.
+    - min_match_score: Minimum match score for estimating north rotation (default: 0.3).
+    - match_threshold: Minimum number of matches to skip rotation (default: 100).
+    - plot_transformation: Whether to plot the transformation during north rotation estimation.
+
+    Returns:
+    - map_obj: The processed map object with updated `north_rotation_angle`.
+    """
+    rotation_angles = [np.pi / 2, np.pi, 3 * np.pi / 2]
+    rotation_degrees = [90, 180, 270]
+
+    # Run SuperPoint pipeline on the target map
+    map_obj.run_superpoint_pipeline()
+    best_match = find_single_best_match(map_obj, base_dataset)
+    num_matches = len(best_match['superglue_matches_df'])
+
+    if num_matches < match_threshold:
+        best_num_matches = num_matches
+        best_angle_rad = None
+
+        # Attempt rotations to improve matches
+        for angle_rad, angle_deg in zip(rotation_angles, rotation_degrees):
+            map_obj.north_rotation_angle = angle_rad
+            map_obj.run_superpoint_pipeline()
+
+            best_match_rotated = find_single_best_match(map_obj, base_dataset)
+            new_num_matches = len(best_match_rotated['superglue_matches_df'])
+
+            if new_num_matches > best_num_matches:
+                best_num_matches = new_num_matches
+                best_angle_rad = angle_rad
+                best_match = best_match_rotated
+
+        if best_angle_rad is not None:
+            map_obj.north_rotation_angle = best_angle_rad
+            map_obj.run_superpoint_pipeline()
+            best_match = best_match_rotated
+
+        # Estimate north rotation based on best match
+        derived_north_rotation = estimate_north_rotation(
+            map_obj, best_match, min_match_score=min_match_score, plot_transformation=plot_transformation
+        )
+    else:
+        # Directly estimate north rotation without imposed rotations
+        derived_north_rotation = estimate_north_rotation(
+            map_obj, best_match, min_match_score=min_match_score, plot_transformation=plot_transformation
+        )
+
+    # Update the map's north rotation angle and re-run the pipeline
+    map_obj.north_rotation_angle = derived_north_rotation
+    map_obj.run_superpoint_pipeline()
+
+    return map_obj
+
+
+
+
+###################
+
+
+
+
+
+

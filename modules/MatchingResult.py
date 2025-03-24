@@ -29,4 +29,5 @@ class MatchingResult:
     enhanced_matches: Optional[pd.DataFrame] = None
     enhanced_ransac_filtered_matches: Optional[pd.DataFrame] = None
     enhanced_delaunay_filtered_matches: Optional[pd.DataFrame] = None
-    gcp_propagated: Optional[pd.DataFrame] = None
+    gcp_propagated_before_enhancement: Optional[pd.DataFrame] = None
+    gcp_propagated_after_enhancement: Optional[pd.DataFrame] = None

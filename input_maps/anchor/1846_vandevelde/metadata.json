@@ -1,0 +1,48 @@
+{
+    "title": "Plan de Jérusalem : construit d'après les relevés du Lt. Symonds R.E. anglais en Mars 1841 et du Dr. T. Tobler en 1845 et 1846 / Par C.W.M. van de Velde...Grave par F. Delamare.",
+    "publishers": [{
+        "wikidata_qid": "Q21645742",
+        "name": "Imp. Lemercier",
+        "location": {
+            "wikidata_qid": "Q90",
+            "name": "Paris",
+            "new_entity": false
+        },
+        "new_entity": false
+    }],
+    "paper_extent": "35.5X25.7 cm",
+    "scale": null,
+    "is_in_nli": true,
+    "nli": {
+        "url":"https://www.nli.org.il/en/maps/NNL_ALEPH990023681950205171/NLI#$FL184621449",
+        "code": "990023681950205171"
+    },
+    "mapmakers": [{
+        "wikidata_qid": "Q1066642",
+        "name": "Charles William Meredith van de Velde",
+        "new_entity": false
+    }],
+    "engravers": [{
+        "wikidata_qid": "Q0",
+        "name": "F. Delamare",
+        "new_entity": true
+    }],
+    "surveyors": [{
+        "wikidata_qid": "Q124465",
+        "name": "Titus Tobler",
+        "new_entity": false
+        }],
+    "survey_date": {
+        "wikidata_property": "P585",
+        "date": "1846-01-01T00:00:00Z"
+    },
+    "publication_date": {
+        "wikidata_property": "P585",
+        "date": "1858-01-01T00:00:00Z"
+    },
+    "language": {
+        "wikidata_property": "P407",
+        "value": "French"
+    }
+}
+  

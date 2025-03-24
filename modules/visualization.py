@@ -123,7 +123,7 @@ def plot_delaunay_matches(match_result, match_result_1, match_result_2, target_m
     image1_rgb = cv2.cvtColor(image1, cv2.COLOR_BGR2RGB)
     image2_rgb = cv2.cvtColor(image2, cv2.COLOR_BGR2RGB)
     # Darken the images
-    dark_factor = 0.65  # Adjust this factor to control darkness (0.0 to 1.0)
+    dark_factor = 0.7  # Adjust this factor to control darkness (0.0 to 1.0)
     image1_rgb = (image1_rgb * dark_factor).astype(np.uint8)
     image2_rgb = (image2_rgb * dark_factor).astype(np.uint8)
 
@@ -151,7 +151,7 @@ def plot_delaunay_matches(match_result, match_result_1, match_result_2, target_m
     fig, axes = plt.subplots(2, 2, figsize=(20, 16))
 
     # Colors
-    color1= colors['aqua_light']
+    color1= 'w' #colors['aqua_light']
     color2 = colors['pink_dark']
 
     def plot_delaunay_with_overlaps(ax, img, keypoints, triangles, title):

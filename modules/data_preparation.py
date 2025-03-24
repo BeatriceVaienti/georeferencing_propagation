@@ -18,6 +18,7 @@ def extract_epsg(crs_info_str):
         print(f"Error extracting EPSG code: {e}, {crs_info_str}")
         return '28193'
 
+
 def preprocess_image(image, mask=None, north_rotation_angle=None, plot_steps=False):
     """
     Function to preprocess an image with optional rotation based on the north direction,
@@ -284,3 +285,65 @@ def preprocess_image(image, mask=None, north_rotation_angle=None, plot_steps=Fal
     image_to_tensor_transform = transformation_matrix
     return image_tensor, image_to_tensor_transform, tensor_to_image_transform
 
+
+def validate_transformations(image, image_tensor, image_to_tensor_transform, tensor_to_image_transform, plot_steps=False):
+    """
+    Function to validate the transformation matrices by plotting a point in the tensor space
+    and transforming it back to the image space and vice versa.
+
+    Parameters:
+    - image: The original image after preprocessing (numpy array).
+    - image_tensor: The processed image tensor (PyTorch tensor).
+    - tensor_to_image_transform: The inverse transformation matrix (3x3 numpy array).
+    - image_to_tensor_transform: The transformation matrix (3x3 numpy array).
+    - plot_steps: Boolean flag to indicate if intermediate steps should be plotted.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    def display_point(image, point, title="Image with Point", color='red'):
+        plt.figure(figsize=(6,6))
+        if image.ndim == 2:
+            plt.imshow(image, cmap='gray')
+        else:
+            plt.imshow(image)
+        plt.scatter(point[0], point[1], c=color, s=50)
+        plt.title(title)
+        plt.axis('off')
+        plt.show()
+
+    # Ensure image_tensor is detached and converted to numpy
+    image_tensor_np = image_tensor.squeeze().cpu().numpy()
+
+    # Step 1: Plot a random point in the tensor space and transform it to image space
+    tensor_h, tensor_w = image_tensor_np.shape[:2]
+    random_point_tensor = np.array([np.random.randint(0, tensor_w), np.random.randint(0, tensor_h), 1])  # Homogeneous coordinates
+    transformed_point_image_space = tensor_to_image_transform @ random_point_tensor
+    transformed_point_image_space /= transformed_point_image_space[2]
+
+    if plot_steps:
+        # Plot the point in the tensor space
+        display_point(image_tensor_np, random_point_tensor[:2], "Point in Tensor Space", color='blue')
+        # Plot the corresponding point in the original image space
+        display_point(image, transformed_point_image_space[:2], "Transformed Point in Image Space", color='green')
+
+    # Step 2: Transform a point from image space to tensor space
+    image_h, image_w = image.shape[:2]
+    random_point_image = np.array([np.random.randint(0, image_w), np.random.randint(0, image_h), 1])  # Homogeneous coordinates
+    transformed_point_tensor_space = image_to_tensor_transform @ random_point_image
+    transformed_point_tensor_space /= transformed_point_tensor_space[2]
+
+    if plot_steps:
+        # Plot the point in the original image space
+        display_point(image, random_point_image[:2], "Point in Image Space", color='red')
+        # Plot the corresponding point in the tensor space
+        display_point(image_tensor_np, transformed_point_tensor_space[:2], "Transformed Point in Tensor Space", color='orange')
+
+    # Verification: Check if transformations are inverses
+    identity_matrix = image_to_tensor_transform @ tensor_to_image_transform
+    if not np.allclose(identity_matrix, np.eye(3), atol=1e-6):
+        print("Warning: image_to_tensor_transform and tensor_to_image_transform are not exact inverses.")
+        print("image_to_tensor_transform @ tensor_to_image_transform =")
+        print(identity_matrix)
+    else:
+        print("Success: image_to_tensor_transform and tensor_to_image_transform are inverses.")
