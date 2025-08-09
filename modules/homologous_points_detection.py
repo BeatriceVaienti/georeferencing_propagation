@@ -487,12 +487,6 @@ def filter_match_with_delaunay(
         matches_df = matches_df.drop(labels=removed_points, axis="index", errors="ignore")
         matches_df.reset_index(drop=True, inplace=True)
 
-        # If we removed the same number of points as last time, no more progress
-        num_removed_now = len(removed_points)
-        if num_removed_now == prev_num_removed:
-            break
-        prev_num_removed = num_removed_now
-
     # -------------------------------------------------------------------------
     # 3) Final pass: remove any lingering overlaps, if desired
     # -------------------------------------------------------------------------
@@ -502,59 +496,6 @@ def filter_match_with_delaunay(
         final_filtered_matches = matches_df
 
     return final_filtered_matches
-
-def filter_match_with_delaunay_old(eval_map, base_dataset, match_result, match_to_filter_df, similarity_threshold=0.3, min_score_match=0.1): # todo: if new version works, remove this one
-    """
-    Optimized version of filtering matches based on Delaunay triangulation and triangle similarity.
-    """
-    # Retrieve the base map corresponding to the match result
-    base_map = next((map_obj for map_obj in base_dataset if map_obj.map_info.folder == match_result.base_folder), None)
-    matches_df = match_to_filter_df
-
-    if matches_df is None or matches_df.empty or len(matches_df) < 4:
-        return matches_df
-
-    # Pre-filter matches based on minimum match score
-
-    matches_df = matches_df[matches_df['match_score'] > min_score_match].reset_index(drop=True)
-    if len(matches_df) < 4:
-        return matches_df
-    #print(f"Initial matches: {len(matches_df)}")
-    # Initial overlapping triangle count
-    overlapping_triangles =  find_overlapping_triangles(matches_df, eval_map, base_map)
-    num_overlapping_triangles = len(overlapping_triangles)
-    if num_overlapping_triangles == 0:
-        return matches_df
-    #print(f"Initial overlapping triangles: {num_overlapping_triangles}")
-
-    # Iterative filtering to reduce overlaps
-    prev_num_overlapping_triangles = num_overlapping_triangles
-    while True:
-        # Apply Delaunay filtering
-        filtered_matches =  filter_matches_with_delaunay(matches_df, similarity_threshold=similarity_threshold)
-
-        # Count overlapping triangles after filtering
-        if len(filtered_matches) < 4:
-            return filtered_matches
-        overlapping_triangles = find_overlapping_triangles(filtered_matches, eval_map, base_map)
-        num_overlapping_triangles = len(overlapping_triangles)
-
-        # Check for convergence
-        if num_overlapping_triangles < prev_num_overlapping_triangles:
-            matches_df = filtered_matches
-            prev_num_overlapping_triangles = num_overlapping_triangles
-        else:
-            break
-
-    # Final cleanup to remove remaining overlaps
-    if len(matches_df) > 3:
-        final_filtered_matches =  remove_remaining_overlaps(matches_df, eval_map, base_map)
-    else:
-        final_filtered_matches = matches_df
-
-    return final_filtered_matches
-
-
 
 def filter_matches_with_delaunay(matches_to_filter, overlapping_simplices, similarity_threshold=0.5, plot=False):
     """
@@ -638,6 +579,7 @@ def filter_matches_with_delaunay(matches_to_filter, overlapping_simplices, simil
     filtered_matches = matches_to_filter[keep_mask].reset_index(drop=True)
 
     return filtered_matches
+
 def plot_triangle(kp1_coords, kp2_coords, simplex, similarity_deviation):
     """
     Helper function to plot a problematic triangle.

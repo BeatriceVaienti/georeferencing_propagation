@@ -11,6 +11,7 @@ from typing import Dict, Any
 from modules.data_preparation import preprocess_image
 from modules.superpoint import run_superpoint_inference
 import warnings
+
 warnings.filterwarnings("ignore", message="invalid value encountered in intersection")
 warnings.filterwarnings("ignore", message="libpng warning: iCCP: known incorrect sRGB profile")
 # Configure logging
@@ -27,26 +28,6 @@ class SuperPointResults:
     descriptors: torch.Tensor
     scores: torch.Tensor
 
-
-@dataclass
-class MapInfo:
-    """
-    Data structure to store metadata and file paths related to a map.
-    """
-    image_path: str
-    mask_path: Optional[str] = None
-    folder: Optional[str] = None
-    author: Optional[str] = None
-    year: Optional[int] = None
-
-from dataclasses import dataclass, field
-from typing import Optional, List
-import os
-import cv2
-import logging
-import numpy as np
-import pandas as pd
-import torch
 
 logger = logging.getLogger(__name__)
 

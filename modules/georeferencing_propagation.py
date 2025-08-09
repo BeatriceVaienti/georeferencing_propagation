@@ -225,8 +225,6 @@ def propagate_georeferencing(
 
 
 
-
-
 def calculate_rmse_with_georeferencing(
     propagated_gcps,
     manual_gcps,
