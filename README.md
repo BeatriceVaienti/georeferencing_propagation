@@ -78,9 +78,9 @@ Before running the pipeline, you need a configuration file (`config.json`) descr
 
 Assuming `run_pipeline.py` is in `scripts/` and your config file is `input/config.json`, run:
 
-\`\`\`bash
+```bash
 python scripts/run_pipeline.py input/config.json
-\`\`\`
+```
 
 This script will:
 1. Load **anchor** maps and run the SuperPoint pipeline.
@@ -92,9 +92,9 @@ This script will:
 
 In your `map_list_preparation.ipynb` (or any other notebook), you can use:
 
-\`\`\`python
-!python scripts/run_pipeline.py input/config.json
-\`\`\`
+```python
+python scripts/run_pipeline.py input/config.json
+```
 
 
 ## Output Files
